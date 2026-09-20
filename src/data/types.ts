@@ -38,6 +38,18 @@ export type BookAvailability = {
   price?: { amount: number; currency: string };
 };
 export type Book = {
+  editionCount?: number;
+  sourceEvidence?: {
+    summary: string;
+    bio: string;
+    sources: string[];
+    checkedAt: string;
+  };
+  source?: {
+    provider: "Open Library" | "Google Books";
+    url: string;
+    fetchedAt: string;
+  };
   id: string;
   title: string;
   originalTitle?: string;
@@ -77,6 +89,9 @@ export type Author = {
   externalLinks?: { label: string; url: string }[];
 };
 export type Draw = {
+  mode?: "smart" | "light";
+  serverId?: string;
+  origin?: "search";
   bookId: string;
   time: number;
   selections: Selection[];

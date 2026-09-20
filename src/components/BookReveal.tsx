@@ -21,7 +21,11 @@ export function BookReveal({
   useEffect(() => {
     title.current?.focus({ preventScroll: true });
   }, [book.id]);
-  const author = authors[book.authorId];
+  const author = authors[book.authorId] ?? {
+    name: book.author,
+    originalName: undefined,
+    shortBio: "外部书库未提供经核实的作者简介。可前往书目来源了解更多。",
+  };
   const attributes = [
     ["安静程度", book.dimensions.quietness],
     ["梦境感", book.dimensions.dreaminess],
@@ -32,7 +36,9 @@ export function BookReveal({
   return (
     <article className="result">
       <div className="result-heading">
-        <span className="eyebrow">原来，是这一本</span>
+        <span className="eyebrow">
+          {draw.origin === "search" ? "在书海里，找到这一页" : "原来，是这一本"}
+        </span>
         <span className="encounter-date">
           {new Date(draw.time).toLocaleDateString("zh-CN", {
             month: "long",
@@ -57,8 +63,14 @@ export function BookReveal({
           </p>
           <p className="teaser">{book.teaser}</p>
           <div className="why">
-            <h2>为什么今晚是它</h2>
-            {draw.exploration && draw.selections.length > 0 ? (
+            <h2>
+              {draw.origin === "search" ? "从外部书架带回" : "为什么今晚是它"}
+            </h2>
+            {draw.origin === "search" ? (
+              <p>
+                这本书来自你的搜索。你可以收藏它，也可以让它参与下一次盲盒。
+              </p>
+            ) : draw.exploration && draw.selections.length > 0 ? (
               <>
                 <span className="unexpected">一点意外</span>
                 <p>
@@ -106,6 +118,18 @@ export function BookReveal({
           <span className="detail-number">01</span>
           <h2>关于这本书</h2>
           <p>{book.bookSummary}</p>
+          {book.source && (
+            <p className="muted">
+              书目信息来自 {book.source.provider}，未经页间人工编选。
+              <a
+                href={book.source.url}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                查看来源 ↗
+              </a>
+            </p>
+          )}
           <div className="metadata">
             {[
               book.tags[0],
@@ -125,28 +149,30 @@ export function BookReveal({
           </p>
           <p>{author.shortBio}</p>
         </section>
-        <section>
-          <span className="detail-number">03</span>
-          <h2>这本书的性格</h2>
-          <div className="attributes">
-            {attributes.map(([label, value]) => (
-              <div key={label}>
-                <span>{label}</span>
-                <span
-                  role="img"
-                  aria-label={`${value}，满格五格`}
-                  className="attribute-dots"
-                >
-                  {Array.from({ length: 5 }, (_, i) => (
-                    <i key={i} className={i < value ? "filled" : ""} />
-                  ))}
-                </span>
-              </div>
-            ))}
-          </div>
-          <small className="muted">页间的主观阅读感受，供你参考。</small>
-          <p className="reading-note">阅读边注 / {book.readingNote}</p>
-        </section>
+        {!book.source && (
+          <section>
+            <span className="detail-number">03</span>
+            <h2>这本书的性格</h2>
+            <div className="attributes">
+              {attributes.map(([label, value]) => (
+                <div key={label}>
+                  <span>{label}</span>
+                  <span
+                    role="img"
+                    aria-label={`${value}，满格五格`}
+                    className="attribute-dots"
+                  >
+                    {Array.from({ length: 5 }, (_, i) => (
+                      <i key={i} className={i < value ? "filled" : ""} />
+                    ))}
+                  </span>
+                </div>
+              ))}
+            </div>
+            <small className="muted">页间的主观阅读感受，供你参考。</small>
+            <p className="reading-note">阅读边注 / {book.readingNote}</p>
+          </section>
+        )}
         <AvailabilitySection key={book.id} book={book} />
         <div className="end-actions">
           <button className="save-button" onClick={onSave}>

@@ -18,9 +18,8 @@ export function BookCover({
         } as CSSProperties
       }
       role="img"
-      aria-label={`${book.title}，${book.author}，页间排印封面`}
+      aria-label={`${book.title}，${book.author}`}
     >
-      <span className="cover-edition">页间 · 阅读相遇</span>
       <div className="cover-title">{book.title}</div>
       <span className="cover-author">{book.author}</span>
       <div className="cover-art" aria-hidden="true">
@@ -28,7 +27,9 @@ export function BookCover({
         <i />
         <i />
       </div>
-      <span className="cover-bottom">BETWEEN PAGES</span>
+      <span className="cover-bottom" aria-hidden="true">
+        页间
+      </span>
     </div>
   );
 }

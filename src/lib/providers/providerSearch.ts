@@ -1,3 +1,4 @@
+import { encodeGbkQuery } from "./encoding";
 import { authors as authorData } from "../../data/authors";
 import type { Book, BookAvailability } from "../../data/types";
 export interface BookProvider {
@@ -5,7 +6,9 @@ export interface BookProvider {
   lookup(book: Book): Promise<BookAvailability[]>;
 }
 export function providerSearch(book: Book): BookAvailability[] {
-  const q = encodeURIComponent(`${book.title} ${book.author}`);
+  const query = `${book.title} ${book.author}`;
+  const q = encodeURIComponent(query);
+  const dangdangQuery = encodeGbkQuery(query) ?? encodeGbkQuery(book.title);
   return [
     {
       provider: "微信读书",
@@ -16,8 +19,8 @@ export function providerSearch(book: Book): BookAvailability[] {
     {
       provider: "当当",
       type: "search",
-      label: "去当当找找",
-      url: `https://search.dangdang.com/?key=${q}`,
+      label: dangdangQuery === null ? "打开当当，按书名搜索" : "去当当找找",
+      url: dangdangQuery === null ? "https://www.dangdang.com/" : `https://search.dangdang.com/?key=${dangdangQuery}&act=input`,
     },
     {
       provider: "京东",

@@ -5,3 +5,8 @@ test-results/
 .sites-runtime/
 artifacts/
 *.tar.gz
+
+.env
+.env.*
+!.env.example
+.local-data/

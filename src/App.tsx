@@ -1,398 +1,562 @@
-import { useReducer, useRef, useEffect } from "react";
-import { BookOpen, Bookmark, History, ArrowLeft } from "lucide-react";
-import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import type { BoxState, Selection, Draw } from "./data/types";
-import { books, bookById } from "./data/books";
-import { TagPicker } from "./components/TagPicker";
-import { BlindBox } from "./components/BlindBox";
-import { BookReveal } from "./components/BookReveal";
-import { BookCover } from "./components/BookCover";
+import { useState, useEffect, useRef } from "react";
+import {
+  AnimatePresence,
+  LayoutGroup,
+  motion,
+  useReducedMotion,
+} from "motion/react";
+import { Bookmark, History, X, BookOpen } from "lucide-react";
+import type { Selection, Draw, Book } from "./data/types";
+import { books as legacyBooks } from "./data/books";
+import { ClueScene } from "./components/ClueScene";
+import { ParcelScene } from "./components/ParcelScene";
+import { ReadingScene } from "./components/ReadingScene";
 import { Sheet } from "./components/Sheet";
-import { recommend } from "./lib/recommendation/recommendation";
 import { useLocalStorage } from "./hooks/useLocalStorage";
-import { useState } from "react";
+import {
+  validCatalog,
+  mergeBooks,
+  type CatalogBook,
+} from "./lib/providers/catalog";
+import { api, session, type Quota, type SavedDraw } from "./lib/api";
+import { QuotaNotice } from "./components/QuotaNotice";
 import { useReadingTools } from "./hooks/useReadingTools";
-const validHistory = (x: unknown): x is Draw[] =>
-  Array.isArray(x) &&
-  x.length <= 20 &&
-  x.every(
+type Scene = "clues" | "parcel" | "opening" | "reading";
+const validIds = (v: unknown): v is string[] =>
+  Array.isArray(v) && v.every((x) => typeof x === "string");
+const validHistory = (v: unknown): v is Draw[] =>
+  Array.isArray(v) &&
+  v.length <= 20 &&
+  v.every(
     (d) =>
       d &&
       typeof d.bookId === "string" &&
-      bookById.has(d.bookId) &&
       typeof d.time === "number" &&
-      typeof d.exploration === "boolean" &&
-      Array.isArray(d.matched) &&
-      d.matched.every((t: unknown) => typeof t === "string") &&
       Array.isArray(d.selections) &&
       d.selections.every(
-        (s: Selection) =>
-          s &&
-          typeof s.id === "string" &&
-          typeof s.label === "string" &&
-          Array.isArray(s.tagIds) &&
-          s.tagIds.every((t) => typeof t === "string"),
-      ),
+        (c: Selection) =>
+          c &&
+          typeof c.id === "string" &&
+          typeof c.label === "string" &&
+          Array.isArray(c.tagIds),
+      ) &&
+      Array.isArray(d.matched),
   );
-const validFavorites = (x: unknown): x is string[] =>
-  Array.isArray(x) &&
-  x.every((id) => typeof id === "string" && bookById.has(id));
-function reducer(state: BoxState, next: BoxState): BoxState {
-  const allowed: Record<BoxState, BoxState[]> = {
-    idle: ["selecting", "ready", "dragging", "opening", "revealed"],
-    selecting: ["ready", "selecting", "opening", "dragging", "revealed"],
-    ready: ["selecting", "dragging", "opening", "revealed"],
-    dragging: ["ready", "opening"],
-    opening: ["revealed", "ready"],
-    revealed: ["closing", "revealed"],
-    closing: ["ready"],
-  };
-  return allowed[state].includes(next) ? next : state;
-}
 export default function App() {
-  const [state, dispatch] = useReducer(reducer, "idle");
-  const [selected, setSelected] = useState<Selection[]>([]),
-    [draw, setDraw] = useState<Draw | null>(null),
-    [panel, setPanel] = useState<"history" | "shelf" | null>(null),
+  const [scene, setScene] = useState<Scene>("clues"),
+    [clues, setClues] = useState<Selection[]>([]),
+    [panel, setPanel] = useState<"shelf" | "history" | null>(null),
+    [waiting, setWaiting] = useState(false),
+    [quota, setQuota] = useState<Quota | null>(null),
+    [smartAvailable, setSmartAvailable] = useState(true),
+    [quotaError, setQuotaError] = useState(""),
+    [drawId, setDrawId] = useState<string | undefined>(),
     [error, setError] = useState(""),
-    [removedFavorite, setRemovedFavorite] = useState<string | null>(null);
-  const [history, setHistory, historyUnavailable] = useLocalStorage(
-    "between-pages:history:v1",
-    [],
-    validHistory,
-  );
-  const [favorites, setFavorites, favoritesUnavailable] = useLocalStorage(
-    "between-pages:favorites:v1",
-    [],
-    validFavorites,
-  );
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null),
-    locked = useRef(false);
+    [current, setCurrent] = useState<Book | null>(null),
+    [currentClues, setCurrentClues] = useState<Selection[]>([]),
+    [usedCache, setUsedCache] = useState(false),
+    [mode, setMode] = useState<"smart" | "light">("smart"),
+    [bookMode, setBookMode] = useState<"smart" | "light">("smart"),
+    [unlocked, setUnlocked] = useState(false),
+    [diagnostic, setDiagnostic] = useState<unknown>(),
+    [privateLocked, setPrivateLocked] = useState(false),
+    [passcode, setPasscode] = useState(""),
+    [phase, setPhase] = useState("正在找书"),
+    [prepared, setPrepared] = useState<SavedDraw | null>(null),
+    [searchClues, setSearchClues] = useState<Selection[]>([]);
+  const [cache, setCache, cacheError] = useLocalStorage<CatalogBook[]>(
+      "between-pages:catalog:v1",
+      [],
+      validCatalog,
+    ),
+    [favorites, setFavorites, favoriteError] = useLocalStorage(
+      "between-pages:favorites:v1",
+      [],
+      validIds,
+    ),
+    [history, setHistory, historyError] = useLocalStorage<Draw[]>(
+      "between-pages:history:v1",
+      [],
+      validHistory,
+    );
+  const locked = useRef(false),
+    pendingId = useRef<string | null>(null),
+    restored = useRef(false),
+    preparationKey = useRef("");
   const reduce = useReducedMotion();
-  const book = draw ? bookById.get(draw.bookId) : undefined;
-  useReadingTools(state, selected, book);
-  useEffect(
-    () => () => {
-      if (timer.current) clearTimeout(timer.current);
-    },
-    [],
+  const catalogue = new Map(
+    [...legacyBooks, ...cache, ...(current ? [current] : [])].map((b) => [
+      b.id,
+      b,
+    ]),
   );
-  function choose(next: Selection[]) {
-    if (locked.current) return;
-    setSelected(next);
-    dispatch(next.length ? "selecting" : "ready");
-  }
-  function open(surprise = false) {
-    if (locked.current || state === "revealed" || state === "closing") return;
-    locked.current = true;
-    setError("");
-    try {
-      const clues = surprise ? [] : selected;
-      if (surprise) setSelected([]);
-      const result = recommend(
-        clues,
-        history.map((d) => d.bookId),
-      );
-      const next: Draw = {
-        bookId: result.book.id,
-        time: Date.now(),
-        selections: clues,
-        matched: result.matched,
-        exploration: result.exploration,
-      };
-      setDraw(next);
-      dispatch("opening");
-      timer.current = setTimeout(
-        () => {
-          setHistory((h) => [next, ...h].slice(0, 20));
-          dispatch("revealed");
-          locked.current = false;
-          window.scrollTo({ top: 0, behavior: "instant" });
-        },
-        reduce ? 80 : 1200,
-      );
-    } catch (e) {
-      setError(
-        e instanceof Error ? e.message : "这一盒暂时没有打开，请再试一次。",
-      );
-      locked.current = false;
-      dispatch("ready");
-    }
-  }
-  function again() {
-    if (locked.current) return;
-    locked.current = true;
-    dispatch("closing");
-    timer.current = setTimeout(
-      () => {
-        setDraw(null);
-        dispatch("ready");
-        locked.current = false;
-        window.scrollTo({ top: 0, behavior: "instant" });
-      },
-      reduce ? 0 : 350,
+  function storeBooks(incoming: CatalogBook[]) {
+    setCache(
+      (old) => mergeBooks([...incoming, ...old]).slice(0, 500) as CatalogBook[],
     );
   }
-  function restore(item: Draw) {
-    if (locked.current) return;
-    setDraw(item);
-    setSelected(item.selections);
-    dispatch("revealed");
+  function accept(result: SavedDraw) {
+    storeBooks([result.book as CatalogBook]);
+    setCurrent(result.book);
+    setBookMode(result.mode ?? result.draw.mode ?? "smart");
+    setMode(result.mode ?? result.draw.mode ?? "smart");
+    setUnlocked(!!result.unlocked);
+    setDiagnostic(result.diagnostic);
+    setCurrentClues(result.draw.selections);
+    setDrawId(result.id);
+    setUsedCache(result.cached);
+    const draw = { ...result.draw, serverId: result.id };
+    setHistory((old) =>
+      [draw, ...old.filter((d) => d.serverId !== result.id)].slice(0, 20),
+    );
+  }
+  async function refreshQuota() {
+    try {
+      const data = await session();
+      if (data.locked) {
+        setPrivateLocked(true);
+        return;
+      }
+      setPrivateLocked(false);
+      setQuota(data.quota);
+      setSmartAvailable(
+        data.smartAvailable !== false && data.aiConfigured !== false,
+      );
+      setQuotaError("");
+      if (
+        (!restored.current && !locked.current) ||
+        (!locked.current &&
+          pendingId.current &&
+          data.latest?.id === pendingId.current)
+      ) {
+        const recovering =
+          !!pendingId.current && data.latest?.id === pendingId.current;
+        pendingId.current = null;
+        restored.current = true;
+        if (data.latest) {
+          if (recovering) {
+            setPrepared(data.latest);
+            setError("");
+            setScene("parcel");
+          } else {
+            accept(data.latest);
+            setScene("reading");
+          }
+        }
+      }
+    } catch {
+      setQuotaError("暂时无法确认次数。");
+    }
+  }
+  useEffect(() => {
+    void refreshQuota();
+    const interval = setInterval(() => void refreshQuota(), 30000);
+    const focus = () => void refreshQuota();
+    window.addEventListener("focus", focus);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener("focus", focus);
+    };
+    // Server clock and cookie are authoritative; refresh never replaces an active scene.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  useEffect(() => {
+    if (!quota) return;
+    const id = setTimeout(
+      () => void refreshQuota(),
+      Math.max(1000, quota.resetAt - quota.serverNow + 100),
+    );
+    return () => clearTimeout(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [quota]);
+  useReadingTools(
+    scene === "clues"
+      ? "selecting"
+      : scene === "reading"
+        ? "revealed"
+        : scene === "opening"
+          ? "opening"
+          : "ready",
+    clues,
+    current ?? undefined,
+  );
+  useEffect(() => {
+    if (!waiting) return;
+    let alive = true;
+    const poll = async () => {
+      if (!pendingId.current) return;
+      try {
+        const r = await api<{ phase: string }>("progress", {
+          id: pendingId.current,
+        });
+        if (
+          alive &&
+          ["正在找书", "正在核对书目", "正在比较线索"].includes(r.phase)
+        )
+          setPhase(r.phase);
+      } catch {
+        /* Draw response remains authoritative. */
+      }
+    };
+    const id = setInterval(() => void poll(), 1800);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, [waiting]);
+  function next() {
+    void prepare();
+  }
+  async function prepare(selectedMode = mode, force = false) {
+    if (locked.current) {
+      if (waiting) setScene("parcel");
+      return;
+    }
+    setScene("parcel");
+    const signature = JSON.stringify([selectedMode, clues]);
+    if (!force && prepared && preparationKey.current === signature) return;
+    if (force || preparationKey.current !== signature) pendingId.current = null;
+    preparationKey.current = signature;
+    setSearchClues(clues);
+    setPrepared(null);
+    if (
+      locked.current ||
+      (selectedMode === "smart" && (!quota || quota.remaining === 0))
+    )
+      return;
+    locked.current = true;
+    setWaiting(true);
+    setPhase("正在找书");
+    setError("");
+    if (!pendingId.current) {
+      const bytes = crypto.getRandomValues(new Uint8Array(16));
+      bytes[6] = (bytes[6] & 15) | 64;
+      bytes[8] = (bytes[8] & 63) | 128;
+      const hex = Array.from(bytes, (b) =>
+        b.toString(16).padStart(2, "0"),
+      ).join("");
+      pendingId.current =
+        hex.slice(0, 8) +
+        "-" +
+        hex.slice(8, 12) +
+        "-" +
+        hex.slice(12, 16) +
+        "-" +
+        hex.slice(16, 20) +
+        "-" +
+        hex.slice(20);
+    }
+    try {
+      const data = await api<{ result: SavedDraw; quota: Quota }>("draw", {
+        id: pendingId.current,
+        clues,
+        mode: selectedMode,
+      });
+      pendingId.current = null;
+      setPrepared(data.result);
+      setQuota(data.quota);
+      restored.current = true;
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "暂时无法拆开，请重试。");
+      locked.current = false;
+      void refreshQuota();
+    } finally {
+      locked.current = false;
+      setWaiting(false);
+    }
+  }
+  function open() {
+    if (locked.current || !prepared) return;
+    locked.current = true;
+    accept(prepared);
+    setPrepared(null);
+    setScene("opening");
+  }
+  function again() {
+    void prepare(mode, true);
+  }
+  function restore(d: Draw) {
+    const b = catalogue.get(d.bookId);
+    if (!b) return;
+    setCurrent(b);
+    setDrawId(d.serverId);
+    setBookMode(d.mode ?? "smart");
+    setMode(d.mode ?? "smart");
+    setUnlocked(false);
+    setDiagnostic(undefined);
+    setCurrentClues(d.selections);
+    setUsedCache(false);
+    setScene("reading");
     setPanel(null);
-    window.scrollTo({ top: 0, behavior: "instant" });
   }
   function save() {
-    if (book)
-      setFavorites((f) =>
-        f.includes(book.id)
-          ? f.filter((id) => id !== book.id)
-          : [book.id, ...f],
+    if (current)
+      setFavorites((old) =>
+        old.includes(current.id)
+          ? old.filter((id) => id !== current.id)
+          : [current.id, ...old],
       );
   }
-  const shown = state === "revealed" || state === "closing";
-  return (
-    <>
-      <a className="skip-link" href="#main">
-        跳到阅读盲盒
-      </a>
-      <header>
-        <a
-          className="brand"
-          href="#main"
-          onClick={(e) => {
+  if (privateLocked)
+    return (
+      <div className="experience private-gate">
+        <form
+          onSubmit={async (e) => {
             e.preventDefault();
-            if (shown) again();
-            else document.getElementById("main")?.focus();
+            try {
+              await api("unlock", { code: passcode });
+              setPasscode("");
+              await refreshQuota();
+            } catch (e) {
+              setError(e instanceof Error ? e.message : "暂时无法进入。");
+            }
           }}
-          aria-label="页间，回到拆盒"
         >
-          <BookOpen size={26} />
-          <strong>页间</strong>
-          <span>BETWEEN PAGES</span>
-        </a>
-        <nav aria-label="阅读记录">
+          <h1>页间 · 私用</h1>
+          <label htmlFor="play-code">访问口令</label>
+          <input
+            id="play-code"
+            type="password"
+            value={passcode}
+            onChange={(e) => setPasscode(e.target.value)}
+            autoComplete="current-password"
+            required
+          />
+          <button className="scene-next" type="submit">
+            进入
+          </button>
+          <p role="status">{error}</p>
+        </form>
+      </div>
+    );
+  return (
+    <div className="experience">
+      <a href="#playfield" className="skip-link">
+        跳到互动区域
+      </a>
+      <header className="experience-header">
+        <div className="edge-brand">
+          页间<span aria-hidden="true"> / </span>
+        </div>
+        {scene === "clues" && (waiting || prepared) && (
+          <button className="task-resume" onClick={() => setScene("parcel")}>
+            {waiting ? "查看找书进度" : "书已备好"}
+          </button>
+        )}
+        {scene === "clues" && current && !waiting && !prepared && (
           <button
-            disabled={state === "opening" || state === "closing"}
-            onClick={() => setPanel("history")}
-            aria-label="今晚开过的书"
+            className="return-current"
+            onClick={() => setScene("reading")}
           >
-            <History size={16} />
-            <span>今晚开过的书</span>
+            继续看这本书
+          </button>
+        )}
+        <nav className="edge-tools" aria-label="阅读记录">
+          <button
+            disabled={scene === "opening" || waiting}
+            onClick={() => setPanel("history")}
+            aria-label="抽过的书"
+          >
+            <History size={18} />
           </button>
           <button
-            disabled={state === "opening" || state === "closing"}
+            disabled={scene === "opening" || waiting}
             onClick={() => setPanel("shelf")}
-            aria-label="我的小书架"
+            aria-label="留下的书"
           >
-            <Bookmark size={16} />
-            <span>我的小书架</span>
-            {favorites.length > 0 && <b>{favorites.length}</b>}
+            <Bookmark size={18} />
           </button>
         </nav>
       </header>
-      <main id="main" tabIndex={-1}>
-        {(historyUnavailable || favoritesUnavailable) && (
-          <p className="storage-note" role="status">
-            浏览器暂时无法保存记录。本次仍可使用书架和历史，关闭页面后可能丢失。
-          </p>
-        )}
-        <AnimatePresence mode="wait">
-          {shown && book && draw ? (
-            <motion.div
-              key="result"
-              initial={reduce ? false : { opacity: 0, y: 12 }}
-              animate={{
-                opacity: state === "closing" ? 0 : 1,
-                y: 0,
-                scale: state === "closing" && !reduce ? 0.96 : 1,
-                x: state === "closing" && !reduce ? -35 : 0,
+      {(scene === "clues" || scene === "parcel") && (
+        <div className="draw-mode" role="group" aria-label="抽书方式">
+          {(["smart", "light"] as const).map((value) => (
+            <button
+              key={value}
+              aria-pressed={mode === value}
+              disabled={waiting || (scene === "parcel" && !!prepared)}
+              onClick={() => {
+                setMode(value);
+                pendingId.current = null;
+                setError("");
+                if (scene === "parcel") void prepare(value);
               }}
-              transition={{ duration: reduce ? 0 : 0.35 }}
             >
-              <button className="back-button" onClick={again}>
-                <ArrowLeft size={16} />
-                再留一些线索
-              </button>
-              <BookReveal
-                book={book}
-                draw={draw}
-                saved={favorites.includes(book.id)}
-                onSave={save}
-                onAgain={again}
-              />
-            </motion.div>
-          ) : (
-            <motion.div
-              key="box"
-              initial={reduce ? false : { opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: reduce ? 0 : 0.15 }}
-            >
-              <div className="intro">
-                <span className="eyebrow">给偶然，留一页空白</span>
-                <h1>
-                  今晚，想遇见
-                  <br />
-                  一本什么样的书<span className="question">？</span>
-                </h1>
-                <p>留下一点线索，把剩下的交给偶然。</p>
-              </div>
-              <div className="workspace">
-                <div
-                  className={state === "opening" ? "picker-disabled" : ""}
-                  inert={state === "opening"}
-                >
-                  <TagPicker
-                    selected={selected}
-                    onChange={choose}
-                    onSurprise={() => open(true)}
-                  />
-                </div>
-                <BlindBox
-                  selected={selected}
-                  state={state}
-                  book={book}
-                  onRemove={(id) => choose(selected.filter((s) => s.id !== id))}
-                  onOpen={() => open()}
-                  onDragState={(dragging) =>
-                    dispatch(dragging ? "dragging" : "ready")
-                  }
-                  onSurprise={() => open(true)}
+              {value === "smart" ? "推敲选书" : "随手抽书"}
+            </button>
+          ))}
+          <small>
+            {!smartAvailable
+              ? "推敲暂不可用，仍可随手抽书。"
+              : mode === "smart"
+                ? "循着线索，比较后再选。"
+                : "按线索随手抽，不耗推敲机会。"}
+          </small>
+        </div>
+      )}
+      <main id="playfield" className="playfield">
+        <LayoutGroup>
+          <AnimatePresence mode="popLayout">
+            {scene === "clues" ? (
+              <motion.div
+                className="scene-layer"
+                key="clues"
+                initial={reduce ? false : { opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: reduce ? 0 : -35 }}
+                transition={{ duration: 0.28 }}
+              >
+                <ClueScene
+                  selected={clues}
+                  onChange={setClues}
+                  onContinue={next}
                 />
-              </div>
-              {error && (
-                <p className="error" role="alert">
-                  {error}
-                </p>
-              )}
-              <div className="bottom-note">
-                <span>不必读完每一本。遇见，也是一件很好的事。</span>
-                <span>一本书 · 一点线索 · 一次偶然</span>
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-      </main>
-      <footer>
-        <span>页间 · BETWEEN PAGES</span>
-        <span>愿你在字里行间，遇见自己。</span>
-      </footer>
-      {panel && (
-        <Sheet
-          title={panel === "history" ? "今晚开过的书" : "我的小书架"}
-          onClose={() => setPanel(null)}
-        >
-          <p className="sheet-subtitle">
-            {panel === "history"
-              ? "相遇过的书，最近 20 次都留在这里。"
-              : "把想再见的书，放在这个小小的角落。"}
-          </p>
-          {panel === "history" ? (
-            history.length ? (
-              <div className="history-list">
-                {history.map((item, i) => {
-                  const b = bookById.get(item.bookId)!;
-                  return (
-                    <button
-                      key={item.time + "-" + i}
-                      onClick={() => restore(item)}
-                    >
-                      <time>
-                        {new Date(item.time).toLocaleDateString("zh-CN", {
-                          month: "2-digit",
-                          day: "2-digit",
-                        })}
-                        <br />
-                        {new Date(item.time).toLocaleTimeString("zh-CN", {
-                          hour: "2-digit",
-                          minute: "2-digit",
-                        })}
-                      </time>
-                      <div>
-                        <strong>{b.title}</strong>
-                        <span>{b.author}</span>
-                      </div>
-                      <span aria-hidden="true">↗</span>
-                    </button>
-                  );
-                })}
-              </div>
+              </motion.div>
+            ) : scene === "reading" && current ? (
+              <motion.div
+                className="scene-layer"
+                key="reading"
+                initial={false}
+                animate={{ opacity: 1 }}
+                exit={{
+                  opacity: 0,
+                  scale: reduce ? 1 : 0.96,
+                  x: reduce ? 0 : 55,
+                }}
+                transition={{ duration: 0.28 }}
+              >
+                <ReadingScene
+                  key={current.id}
+                  book={current}
+                  drawId={drawId}
+                  canDraw={mode === "light" || (!!quota && quota.remaining > 0)}
+                  mode={bookMode}
+                  unlocked={unlocked}
+                  quota={quota}
+                  diagnostic={diagnostic}
+                  onQuota={setQuota}
+                  onHome={() => setScene("clues")}
+                  clues={currentClues}
+                  cached={usedCache}
+                  saved={favorites.includes(current.id)}
+                  onSave={save}
+                  onAgain={again}
+                />
+              </motion.div>
             ) : (
-              <div className="empty">
-                <BookOpen />
-                <p>这里还没有相遇的记录。</p>
-                <button className="text-button" onClick={() => setPanel(null)}>
-                  去拆第一盒书 →
-                </button>
-              </div>
-            )
-          ) : favorites.length ? (
-            <div className="shelf-grid">
-              {favorites.map((id) => {
-                const b = bookById.get(id)!;
-                return (
-                  <div key={id}>
-                    <button
-                      className="shelf-book"
-                      onClick={() =>
-                        restore(
-                          history.find((d) => d.bookId === id) ?? {
-                            bookId: id,
-                            time: Date.now(),
-                            selections: [],
-                            matched: [],
-                            exploration: true,
-                          },
-                        )
-                      }
-                    >
-                      <BookCover book={b} small />
-                      <span>{b.title}</span>
-                    </button>
-                    <button
-                      className="remove-favorite"
-                      onClick={() => {
-                        setRemovedFavorite(id);
-                        setFavorites((f) => f.filter((v) => v !== id));
-                      }}
-                      aria-label={`从书架移除 ${b.title}`}
-                    >
-                      从书架移除
-                    </button>
-                  </div>
-                );
-              })}
-            </div>
-          ) : (
-            <div className="empty">
-              <Bookmark />
-              <p>还没有收进来的书。</p>
-              <p>遇见喜欢的那一本时，轻轻点一下「收进书架」。</p>
-            </div>
-          )}
-          {panel === "shelf" && removedFavorite && (
-            <div className="undo-line" role="status">
-              <span>
-                已从书架移除《{bookById.get(removedFavorite)?.title}》
-              </span>
-              <button
-                onClick={() => {
-                  setFavorites((f) =>
-                    f.includes(removedFavorite) ? f : [removedFavorite, ...f],
-                  );
-                  setRemovedFavorite(null);
+              <motion.div
+                className="scene-layer"
+                key="parcel"
+                initial={reduce ? false : { opacity: 0, scale: 0.94, y: 25 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: scene === "opening" ? 1 : 0 }}
+                transition={{
+                  duration: reduce ? 0 : scene === "opening" ? 0.45 : 0.22,
                 }}
               >
-                撤销
-              </button>
-            </div>
+                <ParcelScene
+                  clues={waiting || prepared ? searchClues : clues}
+                  opening={scene === "opening"}
+                  book={prepared?.book ?? current ?? undefined}
+                  onOpen={open}
+                  onOpened={() => {
+                    setScene("reading");
+                    locked.current = false;
+                  }}
+                  onBack={() => {
+                    setScene("clues");
+                  }}
+                  waiting={waiting}
+                  ready={!!prepared}
+                  exhausted={
+                    !prepared &&
+                    mode === "smart" &&
+                    (!quota || quota.remaining === 0)
+                  }
+                  phase={phase}
+                  error={error}
+                  onRetry={() => void prepare()}
+                />
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </LayoutGroup>
+      </main>
+      <QuotaNotice
+        quota={quota}
+        error={quotaError}
+        onRetry={() => void refreshQuota()}
+      />
+      <div
+        className="scene-position"
+        role="img"
+        aria-label={
+          scene === "clues"
+            ? "第一幕：纸签"
+            : scene === "reading"
+              ? "第三幕：书"
+              : "第二幕：包裹"
+        }
+      >
+        {[0, 1, 2].map((i) => (
+          <i
+            key={i}
+            className={
+              (scene === "clues" ? 0 : scene === "reading" ? 2 : 1) === i
+                ? "active"
+                : ""
+            }
+          />
+        ))}
+      </div>
+      {(cacheError || favoriteError || historyError) && (
+        <p className="storage-toast" role="status">
+          本次记录无法保存，关闭后会丢失。
+        </p>
+      )}
+      {panel && (
+        <Sheet
+          title={panel === "shelf" ? "留下的" : "抽过的"}
+          onClose={() => setPanel(null)}
+        >
+          <div className="archive-list">
+            {(panel === "shelf"
+              ? favorites.map(
+                  (id) =>
+                    history.find((d) => d.bookId === id) ?? {
+                      bookId: id,
+                      time: 0,
+                      selections: [],
+                      matched: [],
+                      exploration: true,
+                    },
+                )
+              : history
+            )
+              .filter((d) => catalogue.has(d.bookId))
+              .map((d, i) => (
+                <button key={d.bookId + i} onClick={() => restore(d)}>
+                  <BookOpen size={18} />
+                  <span>
+                    <strong>{catalogue.get(d.bookId)?.title}</strong>
+                    <small>{catalogue.get(d.bookId)?.author}</small>
+                  </span>
+                  {panel === "shelf" && <CheckMark />}
+                </button>
+              ))}
+          </div>
+          {(panel === "shelf" ? favorites : history).length === 0 && (
+            <p className="empty">还没有。</p>
           )}
-          <p className="local-note">
-            记录仅保存在此浏览器。书库里有 {books.length} 种相遇。
-          </p>
+          <button className="archive-close" onClick={() => setPanel(null)}>
+            <X size={14} />
+            回去
+          </button>
         </Sheet>
       )}
-    </>
+    </div>
   );
+}
+function CheckMark() {
+  return <span aria-hidden="true">✓</span>;
 }
