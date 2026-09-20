@@ -17,7 +17,7 @@ type Control = {
   lease: string;
   lease_until: number;
 };
-const LEASE_MS = 10 * 60_000;
+export const LEASE_MS = 30_000;
 const buckets = [
   "draws",
   "books",
@@ -66,15 +66,25 @@ export class PublicDatabase {
     return !!row && row.count <= 30;
   }
   async acquire() {
-    const token = randomUUID();
+    const token = "v2:" + randomUUID();
     const result = await this.db
       .prepare(
         `UPDATE control SET lease = ?, lease_until = ?
-      WHERE id = 1 AND lease_until < ?`,
+      WHERE id = 1 AND (lease_until <= ? OR lease NOT LIKE 'v2:%')`,
       )
       .bind(token, Date.now() + LEASE_MS, Date.now())
       .run();
     return result.meta.changes === 1 ? token : null;
+  }
+  async heartbeat(token: string) {
+    const now = Date.now();
+    const result = await this.db
+      .prepare(
+        "UPDATE control SET lease_until = ? WHERE id = 1 AND lease = ? AND lease_until > ?",
+      )
+      .bind(now + LEASE_MS, token, now)
+      .run();
+    if (result.meta.changes !== 1) throw Error("lease_lost");
   }
   async load(secret: string) {
     const store = new Store(undefined, false);
@@ -102,9 +112,9 @@ export class PublicDatabase {
     // Fence every write, so an expired request can never overwrite a newer request.
     const held = await this.db
       .prepare(
-        "UPDATE control SET lease_until = ?, models = ? WHERE id = 1 AND lease = ?",
+        "UPDATE control SET models = ? WHERE id = 1 AND lease = ? AND lease_until > ?",
       )
-      .bind(Date.now() + LEASE_MS, JSON.stringify(models), token)
+      .bind(JSON.stringify(models), token, Date.now())
       .run();
     if (held.meta.changes !== 1) throw Error("lease_lost");
     const next = new Map<string, string>();

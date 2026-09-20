@@ -95,3 +95,7 @@ node tests/upgrade-flow.mjs
 生产环境仅设置 DASHSCOPE_API_KEY 与两项 BAILIAN_*_FREE_QUOTA_CONFIRMED，不接收私用口令、无限版开关或本地代理。两款模型均需在百炼控制台开启免费额度用完即停；应用确认标记不能代替控制台开关。仅按白名单顺序切换，遇到 FreeTierOnly 后持久化停用该模型，两款都耗尽仍可随手抽。
 
 构建 npm run build 输出 dist/client 与 dist/server/index.js。db/schema.ts 的变化通过 npm run db:generate 生成迁移。公开版本没有 /api/unlock，查询参数不能开启私用版，.env.local 和 .local-data 不打包。
+
+## 中断恢复修复
+线上找书被取消会留下旧的十分钟锁。现改为 30 秒租约、每 10 秒续期，仅存活任务可续期；waitUntil 保护完成/退款/释放过程。总任务 75 秒超时传递到所有云端书库与模型请求。旧锁在首次新请求中回收，过期待完成记录不再占用额度；旧请求不能续期或覆盖新请求的写入。
+

@@ -17,7 +17,7 @@ await build({
   format: "esm",
   platform: "neutral",
   target: "es2022",
-  external: ["node:crypto", "node:path", "node:http"],
+  external: ["node:crypto", "node:path", "node:http", "node:async_hooks"],
   plugins: [
     {
       name: "worker-network",

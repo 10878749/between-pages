@@ -1,3 +1,4 @@
+import { checkTask, taskSignal } from "./task";
 // Only explicitly approved free-quota-protected versions may be used.
 export let modelProvider: "bigmodel" | "bailian" = "bigmodel";
 let freeQuotaConfirmed = false;
@@ -52,6 +53,7 @@ export async function complete(
   for (const model of models) {
     if (exhausted.has(model)) continue;
     for (let attempt = 0; attempt < 2; attempt++) {
+      checkTask();
       beforeAttempt?.();
       let response: Response;
       try {
@@ -65,7 +67,7 @@ export async function complete(
               "Content-Type": "application/json",
               Authorization: `Bearer ${key}`,
             },
-            signal: AbortSignal.timeout(45000),
+            signal: taskSignal(AbortSignal.timeout(45000)),
             body: JSON.stringify({
               model,
               stream: false,
@@ -83,6 +85,7 @@ export async function complete(
           },
         );
       } catch {
+        checkTask();
         if (attempt === 0) {
           await new Promise((r) => setTimeout(r, 1000));
           continue;
