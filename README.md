@@ -1,11 +1,13 @@
 # 页间 / Between Pages
 
+项目交付与维护见 [交付文档](docs/HANDOFF.md)；开发电影、艺术品等衍生项目见 [盲盒模板扩展指南](docs/VARIANTS.md)。
+
 中文阅读盲盒。React 19、TypeScript、Vite、Motion，配套本地 Node API。提供“推敲选书”和“随手抽书”：每八小时五次推敲机会，随手抽书不限次数且不调用生成服务。随手抽到后可主动使用机会补介绍。另有口令保护的私用无限测试版。运行与配置见 [SERVER.md](SERVER.md)。
 
 ## 本地运行
 
 ```sh
-npm install
+npm ci
 npm run dev
 ```
 
@@ -30,6 +32,7 @@ npm run dev
 ## 验证
 
 ```sh
+npm run build
 npm test
 npm run lint
 npm run build
@@ -39,4 +42,4 @@ node tests/immersive-touch.mjs
 
 浏览器脚本使用本机 Edge。`immersive.mjs` 测试三种屏幕尺寸、自动抽取、取消、自定义线索、收藏、避重、缓存、无缓存断网、axe 和真实书库请求；真实网络部分单独输出结果。旧版 browser/catalog/edge-cases/accessibility 脚本保留作历史参考，不适用于新界面。
 
-新版扇形牌组与左右滑动验证：`node tests/fan.mjs`。服务端限额与模型接口已实现，待在 `.env.local` 配置密钥后启用。最新验收脚本为 `tests/quota.mjs`。
+新版扇形牌组与左右滑动验证：`node tests/fan.mjs`。服务端限额与模型接口已实现；本地使用需要自己配置 `.env.local`。当前自动测试包括 Worker/D1 集成测试，因此首次运行 `npm test` 前需先构建。浏览器动作回归见 `tests/motion-flow.mjs` 和 `tests/upgrade-flow.mjs`；部分历史脚本仍使用旧版限额或界面，仅作参考。
